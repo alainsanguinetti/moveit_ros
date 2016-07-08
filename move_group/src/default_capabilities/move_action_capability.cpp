@@ -110,30 +110,49 @@ void move_group::MoveGroupMoveAction::executeMoveCallback_PlanAndExecute(const m
 
   plan_execution::PlanExecution::Options opt;
 
+  // make sure the start state is empty so that we will use the current state measured by the move group
   const moveit_msgs::MotionPlanRequest &motion_plan_request = planning_scene::PlanningScene::isEmpty(goal->request.start_state) ?
     goal->request : clearRequestStartState(goal->request);
   const moveit_msgs::PlanningScene &planning_scene_diff = planning_scene::PlanningScene::isEmpty(goal->planning_options.planning_scene_diff.robot_state) ?
     goal->planning_options.planning_scene_diff : clearSceneRobotState(goal->planning_options.planning_scene_diff);
 
+  // replanning options
   opt.replan_ = goal->planning_options.replan;
   opt.replan_attempts_ = goal->planning_options.replan_attempts;
   opt.replan_delay_ = goal->planning_options.replan_delay;
+
+  // callback that will update our state to "Monitor"
   opt.before_execution_callback_ = boost::bind(&MoveGroupMoveAction::startMoveExecutionCallback, this);
 
-  opt.plan_callback_ = boost::bind(&MoveGroupMoveAction::planUsingPlanningPipeline, this, boost::cref(motion_plan_request), _1);
+  // plan with sensing
   if (goal->planning_options.look_around && context_->plan_with_sensing_)
   {
-    opt.plan_callback_ = boost::bind(&plan_execution::PlanWithSensing::computePlan, context_->plan_with_sensing_.get(), _1, opt.plan_callback_,
-                                     goal->planning_options.look_around_attempts, goal->planning_options.max_safe_execution_cost);
-    context_->plan_with_sensing_->setBeforeLookCallback(boost::bind(&MoveGroupMoveAction::startMoveLookCallback, this));
+        opt.plan_callback_ = boost::bind(&plan_execution::PlanWithSensing::computePlan
+                                    , context_->plan_with_sensing_.get(), _1, opt.plan_callback_
+                                    , goal->planning_options.look_around_attempts
+                                    , goal->planning_options.max_safe_execution_cost );
+
+        // update our state to "Look"
+        context_->plan_with_sensing_->setBeforeLookCallback(
+                    boost::bind(&MoveGroupMoveAction::startMoveLookCallback, this));
+  }
+  // plan without sensing
+  else
+  {
+      opt.plan_callback_ = boost::bind(&MoveGroupMoveAction::planUsingPlanningPipeline
+                                , this, boost::cref(motion_plan_request), _1);
   }
 
+  // plan and execute
   plan_execution::ExecutableMotionPlan plan;
   context_->plan_execution_->planAndExecute(plan, planning_scene_diff, opt);
 
+  // process the results
   convertToMsg(plan.plan_components_, action_res.trajectory_start, action_res.planned_trajectory);
   if (plan.executed_trajectory_)
+  {
     plan.executed_trajectory_->getRobotTrajectoryMsg(action_res.executed_trajectory);
+  }
   action_res.error_code = plan.error_code_;
 }
 

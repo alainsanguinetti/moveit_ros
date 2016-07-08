@@ -165,13 +165,16 @@ void plan_execution::PlanExecution::planAndExecute(ExecutableMotionPlan &plan, c
 
 void plan_execution::PlanExecution::planAndExecuteHelper(ExecutableMotionPlan &plan, const Options &opt)
 {
-  // perform initial configuration steps & various checks
-  preempt_requested_ = false;
+    // perform initial configuration steps & various checks
+    preempt_requested_ = false;
 
-  // run the actual motion plan & execution
-  unsigned int max_replan_attempts = opt.replan_ ? (opt.replan_attempts_ > 0 ? opt.replan_attempts_ : default_max_replan_attempts_) : 1;
-  unsigned int replan_attempts = 0;
-  bool previously_solved = false;
+    // if replanning is allowed, set the max replan attempts limit to either:
+    // - the requested replan attempt number or
+    // - the default max replan attempt number
+    // if no replanning is allowed, the max replan number is 1.
+    unsigned int max_replan_attempts = opt.replan_ ? ( opt.replan_attempts_ > 0 ? opt.replan_attempts_ : default_max_replan_attempts_) : 1;
+    unsigned int replan_attempts = 0;
+    bool previously_solved = false;
 
   // run a planning loop for at most the maximum replanning attempts;
   // re-planning is executed only in case of known types of failures (e.g., environment changed)
@@ -180,105 +183,155 @@ void plan_execution::PlanExecution::planAndExecuteHelper(ExecutableMotionPlan &p
     replan_attempts++;
     ROS_INFO("Planning attempt %u of at most %u", replan_attempts, max_replan_attempts);
 
+    // if there is callback to call before planning, call it.
     if (opt.before_plan_callback_)
       opt.before_plan_callback_();
 
-    new_scene_update_ = false; // we clear any scene updates to be evaluated because we are about to compute a new plan, which should consider most recent updates already
+    // we clear any scene updates to be evaluated because we are about to compute a new plan,
+    // which should consider most recent updates already
+    new_scene_update_ = false;
 
-    // if we never had a solved plan, or there is no specified way of fixing plans, just call the planner; otherwise, try to repair the plan we previously had;
-    bool solved = (!previously_solved || !opt.repair_plan_callback_) ?
+
+
+    // ** Planning **
+    // if we never had a solved plan, or there is no specified way of fixing plans, just call the planner;
+    // otherwise, try to repair the plan we previously had;
+    bool solved = ( !previously_solved || !opt.repair_plan_callback_ ) ?
       opt.plan_callback_(plan) :
       opt.repair_plan_callback_(plan, trajectory_execution_manager_->getCurrentExpectedTrajectoryIndex());
 
+    // if cancel requested, exit the planning loop
     if (preempt_requested_)
       break;
 
-    // if planning fails in a manner that is not recoverable, we exit the loop,
+    // if planning failed in a manner that is not recoverable, we exit the loop,
     // otherwise, we attempt to continue, if replanning attempts are left
-    if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::PLANNING_FAILED ||
-    plan.error_code_.val == moveit_msgs::MoveItErrorCodes::INVALID_MOTION_PLAN ||
+    if ( plan.error_code_.val == moveit_msgs::MoveItErrorCodes::PLANNING_FAILED ||
+        plan.error_code_.val == moveit_msgs::MoveItErrorCodes::INVALID_MOTION_PLAN ||
         plan.error_code_.val == moveit_msgs::MoveItErrorCodes::UNABLE_TO_AQUIRE_SENSOR_DATA)
     {
-      if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::UNABLE_TO_AQUIRE_SENSOR_DATA && opt.replan_delay_ > 0.0)
-      {
-    ros::WallDuration d(opt.replan_delay_);
-    d.sleep();
-      }
+        if ( plan.error_code_.val == moveit_msgs::MoveItErrorCodes::UNABLE_TO_AQUIRE_SENSOR_DATA &&
+            opt.replan_delay_ > 0.0 )
+        {
+            ROS_INFO("Waiting for a %lf seconds before attempting a new plan ...", opt.replan_delay_);
+            ros::WallDuration d(opt.replan_delay_);
+            d.sleep();
+            ROS_INFO("Done waiting");
+        }
+
       continue;
     }
 
     // abort if no plan was found
-    if (solved)
-      previously_solved = true;
+    if ( solved ) {
+        previously_solved = true;
+    }
     else
+    {
       break;
+    }
 
+
+
+    // ** Execution **
     if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS)
     {
+      // call the optional before execution callback
       if (opt.before_execution_callback_)
+      {
         opt.before_execution_callback_();
+      }
 
+      // if cancel requested, exit the planning loop
       if (preempt_requested_)
+      {
         break;
+      }
 
-      // execute the trajectory, and monitor its executionm
+      // execute the trajectory, and monitor its execution
       plan.error_code_ = executeAndMonitor(plan);
     }
 
+
+
+    // ** Result **
     // if we are done, then we exit the loop
-    if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS)
+    if ( plan.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS)
+    {
       break;
+    }
 
     // if execution failed in a manner that we do not consider recoverable, we exit the loop (with failure)
-    if (plan.error_code_.val != moveit_msgs::MoveItErrorCodes::MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE)
+    if ( plan.error_code_.val != moveit_msgs::MoveItErrorCodes::MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE)
+    {
       break;
+    }
+    // otherwise, we wait (if needed)
     else
     {
-      // othewrise, we wait (if needed)
       if (opt.replan_delay_ > 0.0)
       {
-    ROS_INFO("Waiting for a %lf seconds before attempting a new plan ...", opt.replan_delay_);
-    ros::WallDuration d(opt.replan_delay_);
-    d.sleep();
-    ROS_INFO("Done waiting");
+        ROS_INFO("Waiting for a %lf seconds before attempting a new plan ...", opt.replan_delay_);
+        ros::WallDuration d(opt.replan_delay_);
+        d.sleep();
+        ROS_INFO("Done waiting");
       }
     }
-  } while (!preempt_requested_ && max_replan_attempts > replan_attempts);
 
-  if (preempt_requested_)
-  {
-    ROS_DEBUG("PlanExecution was preempted");
-    plan.error_code_.val = moveit_msgs::MoveItErrorCodes::PREEMPTED;
+  // end of planning loop
+  } while ( !preempt_requested_ && max_replan_attempts > replan_attempts );
+
+
+  // call the optional done callback
+  if (opt.done_callback_) {
+      opt.done_callback_();
   }
 
-  if (opt.done_callback_)
-    opt.done_callback_();
 
-  if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS)
-    ROS_DEBUG("PlanExecution finished successfully.");
-  else
-    ROS_DEBUG("PlanExecution terminating with error code %d - '%s'", plan.error_code_.val,
+  // ** Debugging **
+  // special logs to inform about the reason of failure
+  if (preempt_requested_)
+  {
+      ROS_DEBUG("PlanExecution was preempted");
+      plan.error_code_.val = moveit_msgs::MoveItErrorCodes::PREEMPTED;
+  }
+
+    if (plan.error_code_.val == moveit_msgs::MoveItErrorCodes::SUCCESS )
+    {
+        ROS_DEBUG("PlanExecution finished successfully.");
+    }
+    else
+    {
+        ROS_DEBUG("PlanExecution terminating with error code %d - '%s'", plan.error_code_.val,
               getErrorCodeString(plan.error_code_).c_str());
+    }
 }
 
 bool plan_execution::PlanExecution::isRemainingPathValid(const ExecutableMotionPlan &plan)
 {
   // check the validity of the currently executed path segment only, since there could be
   // changes in the world in between path segments
-  return isRemainingPathValid(plan, trajectory_execution_manager_->getCurrentExpectedTrajectoryIndex());
+  return isRemainingPathValid( plan, trajectory_execution_manager_->getCurrentExpectedTrajectoryIndex() );
 }
 
 bool plan_execution::PlanExecution::isRemainingPathValid(const ExecutableMotionPlan &plan, const std::pair<int, int> &path_segment)
 {
-  if (path_segment.first >= 0 && path_segment.second >= 0 && plan.plan_components_[path_segment.first].trajectory_monitoring_)
+  // if trajectory monitoring is on and
+  if ( path_segment.first >= 0  // index of the path trajectory
+       && path_segment.second >= 0 // index of the state in the trajectory
+       && plan.plan_components_[path_segment.first].trajectory_monitoring_ ) // trajectory monitoring is requested
   {
-    planning_scene_monitor::LockedPlanningSceneRO lscene(plan.planning_scene_monitor_); // lock the scene so that it does not modify the world representation while isStateValid() is called
+    // lock the scene so that it does not modify the world representation while isStateValid() is called
+    planning_scene_monitor::LockedPlanningSceneRO lscene(plan.planning_scene_monitor_);
+
     const robot_trajectory::RobotTrajectory &t = *plan.plan_components_[path_segment.first].trajectory_;
     const collision_detection::AllowedCollisionMatrix *acm = plan.plan_components_[path_segment.first].allowed_collision_matrix_.get();
     std::size_t wpc = t.getWayPointCount();
     collision_detection::CollisionRequest req;
     req.group_name = t.getGroupName();
-    for (std::size_t i = std::max(path_segment.second - 1, 0) ; i < wpc ; ++i)
+
+    // check the states on the trajectory from the current state to the end of the current segment
+    for (std::size_t i = std::max( path_segment.second - 1, 0 ) ; i < wpc ; ++i)
     {
       collision_detection::CollisionResult res;
       if (acm)
@@ -286,7 +339,8 @@ bool plan_execution::PlanExecution::isRemainingPathValid(const ExecutableMotionP
       else
         plan.planning_scene_->checkCollisionUnpadded(req, res, t.getWayPoint(i));
 
-      if (res.collision || !plan.planning_scene_->isStateFeasible(t.getWayPoint(i), false))
+      // if we detected a collision or if the state is not valid
+      if ( res.collision || !plan.planning_scene_->isStateFeasible(t.getWayPoint(i), false) )
       {
         // Dave's debacle
         ROS_INFO("Trajectory component '%s' is invalid", plan.plan_components_[path_segment.first].description_.c_str());
@@ -295,14 +349,18 @@ bool plan_execution::PlanExecution::isRemainingPathValid(const ExecutableMotionP
         plan.planning_scene_->isStateFeasible(t.getWayPoint(i), true);
         req.verbose = true;
         res.clear();
+
         if (acm)
           plan.planning_scene_->checkCollisionUnpadded(req, res, t.getWayPoint(i), *acm);
         else
           plan.planning_scene_->checkCollisionUnpadded(req, res, t.getWayPoint(i));
+
         return false;
       }
     }
   }
+
+  // if the path couldn't be declared as invalid, it is valid
   return true;
 }
 
@@ -310,98 +368,133 @@ moveit_msgs::MoveItErrorCodes plan_execution::PlanExecution::executeAndMonitor(c
 {
   moveit_msgs::MoveItErrorCodes result;
 
-  // try to execute the trajectory
-  execution_complete_ = true;
+    // ** Simple cases **
+    execution_complete_ = true;
 
-  if (!trajectory_execution_manager_)
-  {
-    ROS_ERROR("No trajectory execution manager");
-    result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
-    return result;
-  }
-
-  if (plan.plan_components_.empty())
-  {
-    result.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
-    return result;
-  }
-
-  execution_complete_ = false;
-
-  // push the trajectories we have slated for execution to the trajectory execution manager
-  int prev = -1;
-  for (std::size_t i = 0 ; i < plan.plan_components_.size() ; ++i)
-  {
-    if (!plan.plan_components_[i].trajectory_ || plan.plan_components_[i].trajectory_->empty())
-      continue;
-
-    // \todo should this be in trajectory_execution ? Maybe. Then that will have to use kinematic_trajectory too;
-    // spliting trajectories for controllers becomes interesting: tied to groups instead of joints. this could cause some problems
-    // in the meantime we do a hack:
-
-    bool unwound = false;
-    for (std::size_t j = 0 ; j < i ; ++j)
-      // if we ran unwind on a path for the same group
-      if (plan.plan_components_[j].trajectory_ && plan.plan_components_[j].trajectory_->getGroup() == plan.plan_components_[i].trajectory_->getGroup() && !plan.plan_components_[j].trajectory_->empty())
-      {
-        plan.plan_components_[i].trajectory_->unwind(plan.plan_components_[j].trajectory_->getLastWayPoint());
-        unwound = true;
-        break;
-      }
-
-    if (!unwound)
+    // no TrajectoryExecutionManager
+    if ( !trajectory_execution_manager_ )
     {
-      // unwind the path to execute based on the current state of the system
-      if (prev < 0)
-        plan.plan_components_[i].trajectory_->unwind(plan.planning_scene_monitor_ && plan.planning_scene_monitor_->getStateMonitor() ?
-                                                     *plan.planning_scene_monitor_->getStateMonitor()->getCurrentState() :
-                                                     plan.planning_scene_->getCurrentState());
-      else
-        plan.plan_components_[i].trajectory_->unwind(plan.plan_components_[prev].trajectory_->getLastWayPoint());
+        ROS_ERROR("No trajectory execution manager");
+        result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
+        return result;
     }
 
-    prev = i;
-
-    // convert to message, pass along
-    moveit_msgs::RobotTrajectory msg;
-    plan.plan_components_[i].trajectory_->getRobotTrajectoryMsg(msg);
-    if (!trajectory_execution_manager_->push(msg))
+    // no Trajectories
+    if (plan.plan_components_.empty())
     {
-      trajectory_execution_manager_->clear();
-      ROS_ERROR_STREAM("Apparently trajectory initialization failed");
-      execution_complete_ = true;
-      result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
-      return result;
+        result.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
+        return result;
     }
-  }
 
-  if (!trajectory_monitor_ && planning_scene_monitor_->getStateMonitor())
-    trajectory_monitor_.reset(new planning_scene_monitor::TrajectoryMonitor(planning_scene_monitor_->getStateMonitor()));
 
-  // start recording trajectory states
-  if (trajectory_monitor_)
-    trajectory_monitor_->startTrajectoryMonitor();
+    // ** Complex cases **
+    execution_complete_ = false;
 
-  // start a trajectory execution thread
-  trajectory_execution_manager_->execute(boost::bind(&PlanExecution::doneWithTrajectoryExecution, this, _1),
+    // push the trajectories we have slated for execution to the trajectory execution manager
+    int prev = -1;
+    for ( std::size_t i = 0 ; i < plan.plan_components_.size() ; ++i )
+    {
+        // if there is no trajectory here or if the trajectory is empty, skip it
+        if ( !plan.plan_components_[i].trajectory_ || plan.plan_components_[i].trajectory_->empty() )
+        {
+            continue;
+        }
+
+        // \todo should this be in trajectory_execution ? Maybe. Then that will have to use kinematic_trajectory too;
+        // spliting trajectories for controllers becomes interesting: tied to groups instead of joints. this could cause some problems
+        // in the meantime we do a hack:
+
+        bool unwound = false;
+        // if we ran unwind on a path for the same group, use the last state of this path
+        for (std::size_t j = 0 ; j < i ; ++j)
+        {
+              if ( plan.plan_components_[j].trajectory_
+                   && plan.plan_components_[j].trajectory_->getGroup() == plan.plan_components_[i].trajectory_->getGroup()
+                   && !plan.plan_components_[j].trajectory_->empty() )
+              {
+                    plan.plan_components_[i].trajectory_->unwind( plan.plan_components_[j].trajectory_->getLastWayPoint() );
+                    unwound = true;
+                    break;
+              }
+        }
+
+        // if the previous mean of unwinding was unsuccessful,
+        // unwind the path to execute based on the current state of the system
+        if (!unwound)
+        {
+            // if there is no previous part
+            if (prev < 0 )
+            {
+                // use either:
+                // - the planning_scene_monitor's current state monitor's state if it exists
+                // - the planning_scene's state
+                plan.plan_components_[i].trajectory_->unwind(
+                    plan.planning_scene_monitor_ && plan.planning_scene_monitor_->getStateMonitor() ?
+                        *plan.planning_scene_monitor_->getStateMonitor()->getCurrentState() :
+                        plan.planning_scene_->getCurrentState());
+            }
+            else
+            {
+                // unwind using the last state of the previous part
+                // TODO: even if this is not the same group ?? <= does that make sense ? does it work ?
+                plan.plan_components_[i].trajectory_->unwind(plan.plan_components_[prev].trajectory_->getLastWayPoint());
+            }
+        }
+
+        prev = i;
+
+        // convert to message, pass along
+        moveit_msgs::RobotTrajectory msg;
+        plan.plan_components_[i].trajectory_->getRobotTrajectoryMsg( msg );
+        if ( !trajectory_execution_manager_->push( msg ) )
+        {
+            // if the trajectory execution failed, cleanup and exit.
+            trajectory_execution_manager_->clear(); // remove the trajectories
+            ROS_ERROR_STREAM("Apparently trajectory initialization failed");
+            execution_complete_ = true;
+            result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
+            return result;
+        }
+    }
+
+    // create a trajectory monitor for recording from the planning scene monitor
+    if ( !trajectory_monitor_ && planning_scene_monitor_->getStateMonitor() )
+    {
+        trajectory_monitor_.reset(new planning_scene_monitor::TrajectoryMonitor(planning_scene_monitor_->getStateMonitor()));
+    }
+
+    // start recording trajectory states if possible
+    if ( trajectory_monitor_ )
+    {
+        trajectory_monitor_->startTrajectoryMonitor();
+    }
+
+    // start a trajectory execution thread
+    trajectory_execution_manager_->execute(boost::bind(&PlanExecution::doneWithTrajectoryExecution, this, _1),
                                          boost::bind(&PlanExecution::successfulTrajectorySegmentExecution, this, &plan, _1));
-  // wait for path to be done, while checking that the path does not become invalid
-  ros::Rate r(100);
-  path_became_invalid_ = false;
-  while (node_handle_.ok() && !execution_complete_ && !preempt_requested_ && !path_became_invalid_)
-  {
-    r.sleep();
-    // check the path if there was an environment update in the meantime
-    if (new_scene_update_)
+
+    // wait for path to be done, while checking that the path does not become invalid
+    ros::Rate r(100);
+    path_became_invalid_ = false;
+    while (node_handle_.ok()
+           && !execution_complete_
+           && !preempt_requested_
+           && !path_became_invalid_ )
     {
-      new_scene_update_ = false;
-      if (!isRemainingPathValid(plan))
-      {
-        path_became_invalid_ = true;
-        break;
-      }
+        r.sleep();
+
+        // check the path if there was an environment update in the meantime
+        if (new_scene_update_)
+        {
+            new_scene_update_ = false;
+
+            if ( !isRemainingPathValid(plan) )
+            {
+                path_became_invalid_ = true;
+                break;
+            }
+        }
     }
-  }
 
   // stop execution if needed
   if (preempt_requested_)
@@ -424,11 +517,15 @@ moveit_msgs::MoveItErrorCodes plan_execution::PlanExecution::executeAndMonitor(c
 
   // stop recording trajectory states
   if (trajectory_monitor_)
+  {
     trajectory_monitor_->stopTrajectoryMonitor();
+  }
 
   // decide return value
   if (path_became_invalid_)
+  {
     result.val = moveit_msgs::MoveItErrorCodes::MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE;
+  }
   else
   {
     if (preempt_requested_)
@@ -437,21 +534,30 @@ moveit_msgs::MoveItErrorCodes plan_execution::PlanExecution::executeAndMonitor(c
     }
     else
     {
-      if (trajectory_execution_manager_->getLastExecutionStatus() == moveit_controller_manager::ExecutionStatus::SUCCEEDED)
-    result.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
-      else
-        if (trajectory_execution_manager_->getLastExecutionStatus() == moveit_controller_manager::ExecutionStatus::TIMED_OUT)
-      result.val = moveit_msgs::MoveItErrorCodes::TIMED_OUT;
-    else
-      result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
+        if (trajectory_execution_manager_->getLastExecutionStatus() == moveit_controller_manager::ExecutionStatus::SUCCEEDED)
+        {
+          result.val = moveit_msgs::MoveItErrorCodes::SUCCESS;
+        }
+        else
+        {
+            if (trajectory_execution_manager_->getLastExecutionStatus() == moveit_controller_manager::ExecutionStatus::TIMED_OUT)
+            {
+                result.val = moveit_msgs::MoveItErrorCodes::TIMED_OUT;
+            }
+            else
+            {
+                result.val = moveit_msgs::MoveItErrorCodes::CONTROL_FAILED;
+            }
+        }
     }
   }
+
   return result;
 }
 
 void plan_execution::PlanExecution::planningSceneUpdatedCallback(const planning_scene_monitor::PlanningSceneMonitor::SceneUpdateType update_type)
 {
-  if (update_type & (planning_scene_monitor::PlanningSceneMonitor::UPDATE_GEOMETRY | planning_scene_monitor::PlanningSceneMonitor::UPDATE_TRANSFORMS))
+  if ( update_type & ( planning_scene_monitor::PlanningSceneMonitor::UPDATE_GEOMETRY | planning_scene_monitor::PlanningSceneMonitor::UPDATE_TRANSFORMS ) )
     new_scene_update_ = true;
 }
 

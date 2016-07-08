@@ -149,7 +149,7 @@ int main(int argc, char **argv)
 {
   ros::init(argc, argv, move_group::NODE_NAME);
 
-  ros::AsyncSpinner spinner(1);
+  ros::AsyncSpinner spinner(0);
   spinner.start();
 
   boost::shared_ptr<tf::TransformListener> tf(new tf::TransformListener(ros::Duration(10.0)));

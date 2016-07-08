@@ -495,7 +495,7 @@ public:
   MoveItErrorCode place(const std::string &object, const std::vector<geometry_msgs::PoseStamped> &poses)
   {
     std::vector<moveit_msgs::PlaceLocation> locations;
-    for (std::size_t i = 0; i < poses.size(); ++i)
+    for ( std::size_t i = 0; i < poses.size(); ++i )
     {
       moveit_msgs::PlaceLocation location;
       location.pre_place_approach.direction.vector.z = -1.0;
